@@ -23,3 +23,12 @@ EOF
 
 echo -e "\n\n=== [TEST 3] List Reports (Inspector: Bob) ==="
 ./city_manager --role inspector --user bob --list downtown
+
+echo -e "\n=== [TEST 4] Checking Symlink & Directory Structure ==="
+ls -l active_reports-downtown
+ls -la downtown/
+
+echo -e "\n=== [TEST 5] Checking Audit Log ==="
+cat downtown/logged_district
+
+echo -e "\n=== Test 1 Completed ==="
