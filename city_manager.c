@@ -7,6 +7,7 @@
 #include <time.h>
 #include <fcntl.h>
 
+// Fixed-size limits as required by the specifications
 #define NAME_LEN        32
 #define CATEGORY_LEN    16
 #define DESC_LEN        128
@@ -15,6 +16,7 @@
 #define ROLE_INSPECTOR  0
 #define ROLE_MANAGER    1
 
+// The fixed-size binary record structure
 typedef struct {
     int    id;
     char   inspector[NAME_LEN];
@@ -26,6 +28,7 @@ typedef struct {
     char   description[DESC_LEN];
 } Report;
 
+// Structure to hold parsed command-line arguments
 typedef struct {
     int  role;
     char user[NAME_LEN];
@@ -41,6 +44,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s --role <inspector|manager> --user <n> --<command> [args...]\n", prog);
 }
 
+// Parses the CLI arguments and populates the Args structure
 static int parse_args(int argc, char *argv[], Args *args) {
     if (argc < 2) { usage(argv[0]); return -1; }
     memset(args, 0, sizeof(*args));
@@ -69,6 +73,7 @@ static int parse_args(int argc, char *argv[], Args *args) {
             strncpy(args->district, argv[++i], DISTRICT_LEN - 1); args->threshold = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
             strncpy(args->command, "filter", 31); strncpy(args->district, argv[++i], DISTRICT_LEN - 1);
+            // Collect all filter conditions
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 if (args->nconditions < 8) strncpy(args->conditions[args->nconditions++], argv[++i], 63);
                 else i++;
@@ -81,6 +86,7 @@ static int parse_args(int argc, char *argv[], Args *args) {
     return 0;
 }
 
+// Helper: Converts permission bits to a 9-character string (e.g., "rw-rw-r--")
 void mode_to_str(mode_t mode, char *str) {
     strcpy(str, "---------");
     if (mode & S_IRUSR) str[0] = 'r'; if (mode & S_IWUSR) str[1] = 'w'; if (mode & S_IXUSR) str[2] = 'x';
@@ -88,38 +94,54 @@ void mode_to_str(mode_t mode, char *str) {
     if (mode & S_IROTH) str[6] = 'r'; if (mode & S_IWOTH) str[7] = 'w'; if (mode & S_IXOTH) str[8] = 'x';
 }
 
+// Helper: Checks if the current role has the requested read/write access based on file stats
 int check_access(const char *path, int role, int need_read, int need_write) {
     struct stat st;
-    if (stat(path, &st) != 0) return 1; 
+    if (stat(path, &st) != 0) return 1; // If file doesn't exist yet, allow operation to create it
+    
+    // Managers act as Owners (USR), Inspectors act as Group (GRP)
     int can_read = (role == ROLE_MANAGER) ? (st.st_mode & S_IRUSR) : (st.st_mode & S_IRGRP);
     int can_write = (role == ROLE_MANAGER) ? (st.st_mode & S_IWUSR) : (st.st_mode & S_IWGRP);
+    
     if (need_read && !can_read) return 0;
     if (need_write && !can_write) return 0;
     return 1;
 }
 
+// Creates the district directory, files, explicit permissions, and symbolic links
 void init_district(const char *dist) {
     struct stat st;
+    // Create directory if it doesn't exist, set to 750 (rwxr-x---)
     if (stat(dist, &st) == -1) { mkdir(dist, 0750); chmod(dist, 0750); }
     char path[256], slink[256];
     
+    // Create binary file, set to 664 (rw-rw-r--)
     snprintf(path, sizeof(path), "%s/reports.dat", dist);
     if (stat(path, &st) == -1) { int fd = open(path, O_CREAT, 0664); close(fd); chmod(path, 0664); }
+    
+    // Create config file, set to 640 (rw-r-----)
     snprintf(path, sizeof(path), "%s/district.cfg", dist);
     if (stat(path, &st) == -1) { int fd = open(path, O_CREAT, 0640); close(fd); chmod(path, 0640); }
+    
+    // Create log file, set to 644 (rw-r--r--)
     snprintf(path, sizeof(path), "%s/logged_district", dist);
     if (stat(path, &st) == -1) { int fd = open(path, O_CREAT, 0644); close(fd); chmod(path, 0644); }
     
+    // Handle the symbolic link
     snprintf(path, sizeof(path), "%s/reports.dat", dist);
     snprintf(slink, sizeof(slink), "active_reports-%s", dist);
+    
+    // Use lstat to check if link exists without following it
     if (lstat(slink, &st) == 0) {
         if (S_ISLNK(st.st_mode)) {
             struct stat tgt;
+            // Check if the link is dangling
             if (stat(slink, &tgt) != 0) fprintf(stderr, "Warning: Dangling symlink %s\n", slink);
         }
-    } else symlink(path, slink);
+    } else symlink(path, slink); // Create link if it doesn't exist
 }
 
+// Logs actions to logged_district. Rejects inspectors writing to it.
 void log_action(const Args *args) {
     char path[256]; snprintf(path, sizeof(path), "%s/logged_district", args->district);
     if (!check_access(path, args->role, 0, 1)) {
@@ -132,6 +154,7 @@ void log_action(const Args *args) {
     }
 }
 
+// AI-Assisted Function: Parses a "field:op:value" string
 int parse_condition(const char *input, char *field, char *op, char *value) {
     char temp[64]; strncpy(temp, input, 63); temp[63] = '\0';
     char *t1 = strtok(temp, ":");
@@ -142,6 +165,7 @@ int parse_condition(const char *input, char *field, char *op, char *value) {
     return 1;
 }
 
+// AI-Assisted Function: Matches a parsed condition against a Report record
 int match_condition(Report *r, const char *field, const char *op, const char *value) {
     if (strcmp(field, "severity") == 0) {
         int v = atoi(value);
@@ -170,6 +194,8 @@ static int cmd_add(const Args *args) {
 
     Report r; memset(&r, 0, sizeof(r));
     struct stat st; stat(path, &st);
+    
+    // Auto-increment ID based on file size
     r.id = (st.st_size / sizeof(Report)) + 1;
     strncpy(r.inspector, args->user, NAME_LEN - 1);
     r.timestamp = time(NULL);
@@ -178,11 +204,14 @@ static int cmd_add(const Args *args) {
     printf("Y: "); scanf("%lf", &r.lon);
     printf("Category: "); scanf("%15s", r.category);
     printf("Severity (1/2/3): "); scanf("%d", &r.severity);
+    
+    // Clear input buffer before reading string with spaces
     int c; while ((c = getchar()) != '\n' && c != EOF);
+    
     printf("Description: ");
-    fgets(r.description, DESC_LEN, stdin); r.description[strcspn(r.description, "\n")] = 0;
+    fgets(r.description, DESC_LEN, stdin); r.description[strcspn(r.description, "\n")] = 0; // Strip newline
 
-    FILE *f = fopen(path, "ab");
+    FILE *f = fopen(path, "ab"); // Append binary
     if (f) { fwrite(&r, sizeof(Report), 1, f); fclose(f); }
     log_action(args); return 0;
 }
@@ -197,9 +226,11 @@ static int cmd_list(const Args *args) {
         char perms[10]; mode_to_str(st.st_mode, perms);
         printf("File: %s | Perms: %s | Size: %ld bytes\n", path, perms, st.st_size);
     }
-    FILE *f = fopen(path, "rb");
+    
+    FILE *f = fopen(path, "rb"); // Read binary
     if (f) {
         Report r;
+        // Read struct-by-struct
         while (fread(&r, sizeof(Report), 1, f) == 1)
             printf("ID: %d | Cat: %s | Sev: %d | Desc: %s\n", r.id, r.category, r.severity, r.description);
         fclose(f);
@@ -232,7 +263,9 @@ static int cmd_remove_report(const Args *args) {
     
     int fd = open(path, O_RDWR);
     if (fd < 0) return -1;
+    
     Report r; off_t pos = 0, found_pos = -1;
+    // Find the record to delete
     while (read(fd, &r, sizeof(Report)) == sizeof(Report)) {
         if (r.id == args->report_id) { found_pos = pos; break; }
         pos += sizeof(Report);
@@ -241,6 +274,8 @@ static int cmd_remove_report(const Args *args) {
     if (found_pos != -1) {
         off_t read_pos = found_pos + sizeof(Report);
         off_t write_pos = found_pos;
+        
+        // Shift all subsequent records left by one block
         while (1) {
             lseek(fd, read_pos, SEEK_SET);
             if (read(fd, &r, sizeof(Report)) != sizeof(Report)) break;
@@ -248,6 +283,7 @@ static int cmd_remove_report(const Args *args) {
             write(fd, &r, sizeof(Report));
             read_pos += sizeof(Report); write_pos += sizeof(Report);
         }
+        // Truncate the file to chop off the leftover duplicate at the end
         ftruncate(fd, write_pos);
         printf("Report %d removed.\n", args->report_id);
     } else {
@@ -262,6 +298,7 @@ static int cmd_update_threshold(const Args *args) {
     
     struct stat st;
     if (stat(path, &st) == 0) {
+        // Validate strict 640 permissions before modifying
         if ((st.st_mode & 0777) != 0640) {
             fprintf(stderr, "Diagnostic: district.cfg permissions altered! Refusing update.\n");
             return -1;
@@ -280,6 +317,7 @@ static int cmd_filter(const Args *args) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     Report r;
+    // Iterate over all reports and test against all given conditions (AND logic)
     while (fread(&r, sizeof(Report), 1, f) == 1) {
         int match_all = 1;
         for (int i = 0; i < args->nconditions; i++) {
