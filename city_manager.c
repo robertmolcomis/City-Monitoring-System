@@ -6,6 +6,10 @@
 #include <sys/types.h>
 #include <time.h>
 #include <fcntl.h>
+// --- PHASE 2 ADDITION ---
+#include <sys/wait.h>
+#include <signal.h>
+// ------------------------
 
 // Fixed-size limits as required by the specifications
 #define NAME_LEN        32
@@ -71,6 +75,11 @@ static int parse_args(int argc, char *argv[], Args *args) {
         } else if (strcmp(argv[i], "--update_threshold") == 0 && i + 2 < argc) {
             strncpy(args->command, "update_threshold", 31);
             strncpy(args->district, argv[++i], DISTRICT_LEN - 1); args->threshold = atoi(argv[++i]);
+        // --- PHASE 2 ADDITION ---
+        } else if (strcmp(argv[i], "--remove_district") == 0 && i + 1 < argc) {
+            strncpy(args->command, "remove_district", 31);
+            strncpy(args->district, argv[++i], DISTRICT_LEN - 1);
+        // ------------------------
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
             strncpy(args->command, "filter", 31); strncpy(args->district, argv[++i], DISTRICT_LEN - 1);
             // Collect all filter conditions
@@ -89,9 +98,15 @@ static int parse_args(int argc, char *argv[], Args *args) {
 // Helper: Converts permission bits to a 9-character string (e.g., "rw-rw-r--")
 void mode_to_str(mode_t mode, char *str) {
     strcpy(str, "---------");
-    if (mode & S_IRUSR) str[0] = 'r'; if (mode & S_IWUSR) str[1] = 'w'; if (mode & S_IXUSR) str[2] = 'x';
-    if (mode & S_IRGRP) str[3] = 'r'; if (mode & S_IWGRP) str[4] = 'w'; if (mode & S_IXGRP) str[5] = 'x';
-    if (mode & S_IROTH) str[6] = 'r'; if (mode & S_IWOTH) str[7] = 'w'; if (mode & S_IXOTH) str[8] = 'x';
+    if (mode & S_IRUSR) str[0] = 'r'; 
+    if (mode & S_IWUSR) str[1] = 'w'; 
+    if (mode & S_IXUSR) str[2] = 'x';
+    if (mode & S_IRGRP) str[3] = 'r'; 
+    if (mode & S_IWGRP) str[4] = 'w'; 
+    if (mode & S_IXGRP) str[5] = 'x';
+    if (mode & S_IROTH) str[6] = 'r'; 
+    if (mode & S_IWOTH) str[7] = 'w'; 
+    if (mode & S_IXOTH) str[8] = 'x';
 }
 
 // Helper: Checks if the current role has the requested read/write access based on file stats
@@ -142,14 +157,23 @@ void init_district(const char *dist) {
 }
 
 // Logs actions to logged_district. Rejects inspectors writing to it.
-void log_action(const Args *args) {
+// --- PHASE 2 ADDITION ---
+// Modified log_action to accept an optional 'extra_msg' string for reporting monitor status
+void log_action(const Args *args, const char *extra_msg) {
+// ------------------------
     char path[256]; snprintf(path, sizeof(path), "%s/logged_district", args->district);
     if (!check_access(path, args->role, 0, 1)) {
         fprintf(stderr, "Diagnostic: Inspector role refused write access to logged_district.\n"); return;
     }
     FILE *f = fopen(path, "a");
     if (f) {
-        fprintf(f, "%ld\t%s\t%s\t%s\n", time(NULL), args->user, args->role == ROLE_MANAGER ? "manager" : "inspector", args->command);
+        fprintf(f, "%ld\t%s\t%s\t%s", time(NULL), args->user, args->role == ROLE_MANAGER ? "manager" : "inspector", args->command);
+        // --- PHASE 2 ADDITION ---
+        if (extra_msg) {
+            fprintf(f, "\t%s", extra_msg);
+        }
+        // ------------------------
+        fprintf(f, "\n");
         fclose(f);
     }
 }
@@ -213,7 +237,27 @@ static int cmd_add(const Args *args) {
 
     FILE *f = fopen(path, "ab"); // Append binary
     if (f) { fwrite(&r, sizeof(Report), 1, f); fclose(f); }
-    log_action(args); return 0;
+
+    // --- PHASE 2 ADDITION ---
+    // Read the monitor PID, send SIGUSR1, and log the outcome
+    int notify_success = 0;
+    FILE *pid_file = fopen(".monitor_pid", "r");
+    if (pid_file) {
+        pid_t monitor_pid;
+        if (fscanf(pid_file, "%d", &monitor_pid) == 1) {
+            // Signal the monitor process
+            if (kill(monitor_pid, SIGUSR1) == 0) {
+                notify_success = 1;
+            }
+        }
+        fclose(pid_file);
+    }
+    
+    const char *msg = notify_success ? "Successfully notified monitor of new report." : "Error: Could not inform monitor of new report.";
+    log_action(args, msg); 
+    // ------------------------
+
+    return 0;
 }
 
 static int cmd_list(const Args *args) {
@@ -235,7 +279,7 @@ static int cmd_list(const Args *args) {
             printf("ID: %d | Cat: %s | Sev: %d | Desc: %s\n", r.id, r.category, r.severity, r.description);
         fclose(f);
     }
-    log_action(args); return 0;
+    log_action(args, NULL); return 0; // Updated log_action signature
 }
 
 static int cmd_view(const Args *args) {
@@ -254,7 +298,7 @@ static int cmd_view(const Args *args) {
     }
     fclose(f);
     if (!found) printf("Report %d not found.\n", args->report_id);
-    log_action(args); return 0;
+    log_action(args, NULL); return 0; // Updated log_action signature
 }
 
 static int cmd_remove_report(const Args *args) {
@@ -289,7 +333,7 @@ static int cmd_remove_report(const Args *args) {
     } else {
         printf("Report %d not found.\n", args->report_id);
     }
-    close(fd); log_action(args); return 0;
+    close(fd); log_action(args, NULL); return 0; // Updated log_action signature
 }
 
 static int cmd_update_threshold(const Args *args) {
@@ -307,7 +351,7 @@ static int cmd_update_threshold(const Args *args) {
     
     FILE *f = fopen(path, "w");
     if (f) { fprintf(f, "THRESHOLD=%d\n", args->threshold); fclose(f); }
-    log_action(args); return 0;
+    log_action(args, NULL); return 0; // Updated log_action signature
 }
 
 static int cmd_filter(const Args *args) {
@@ -328,8 +372,54 @@ static int cmd_filter(const Args *args) {
         }
         if (match_all) printf("ID: %d | Cat: %s | Sev: %d | Desc: %s\n", r.id, r.category, r.severity, r.description);
     }
-    fclose(f); log_action(args); return 0;
+    fclose(f); log_action(args, NULL); return 0; // Updated log_action signature
 }
+
+// --- PHASE 2 ADDITION ---
+static int cmd_remove_district(const Args *args) {
+    if (args->role != ROLE_MANAGER) {
+        fprintf(stderr, "Error: Requires manager role to remove district.\n");
+        return -1;
+    }
+
+    // Critical Safety Guard: Do not allow relative paths or root navigation. 
+    // Just a basic sanitize to prevent `rm -rf /` or `rm -rf ../../` 
+    if (strchr(args->district, '/') != NULL || strstr(args->district, "..") != NULL) {
+        fprintf(stderr, "Error: Invalid district name format. Removal aborted for safety.\n");
+        return -1;
+    }
+
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        perror("Fork failed");
+        return -1;
+    }
+
+    if (pid == 0) {
+        // We are in the child process
+        execlp("rm", "rm", "-rf", args->district, NULL);
+        
+        // If execlp returns, an error occurred
+        perror("Exec failed");
+        exit(EXIT_FAILURE);
+    } else {
+        // Parent process: Wait for the child to finish removing the directory
+        wait(NULL);
+
+        // Additionally remove the symbolic link
+        char slink[256];
+        snprintf(slink, sizeof(slink), "active_reports-%s", args->district);
+        unlink(slink);
+
+        printf("District '%s' and its symlink have been successfully removed.\n", args->district);
+        
+        // Note: we do NOT call log_action here because the district's logged_district file was just deleted.
+    }
+
+    return 0;
+}
+// ------------------------
 
 int main(int argc, char *argv[]) {
     Args args;
@@ -342,6 +432,9 @@ int main(int argc, char *argv[]) {
     else if (strcmp(args.command, "remove_report")    == 0) ret = cmd_remove_report(&args);
     else if (strcmp(args.command, "update_threshold") == 0) ret = cmd_update_threshold(&args);
     else if (strcmp(args.command, "filter")           == 0) ret = cmd_filter(&args);
+    // --- PHASE 2 ADDITION ---
+    else if (strcmp(args.command, "remove_district")  == 0) ret = cmd_remove_district(&args);
+    // ------------------------
     
     return ret;
 }
